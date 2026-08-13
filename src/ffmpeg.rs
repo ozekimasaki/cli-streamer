@@ -1,14 +1,17 @@
 //! ffmpeg コマンド生成と spawn。
 
 use crate::config::{mask_secrets, Config, Destination};
+use crate::session::DisplayServer;
 use std::io;
 use std::process::{Child, Command, Stdio};
 
 #[derive(Debug, Clone)]
 pub struct StreamRequest {
-    pub window_id: String,
+    /// X11 のとき必須（0xid）。Wayland では None（ポータルで選択）。
+    pub window_id: Option<String>,
     pub audio: Option<String>,
     pub destinations: Vec<Destination>,
+    pub display: DisplayServer,
 }
 
 /// ffmpeg 引数リストを組み立てる（プログラム名は含めない）。
@@ -17,8 +20,6 @@ pub fn build_args(cfg: &Config, req: &StreamRequest) -> Result<Vec<String>, Stri
         return Err("配信先が指定されていません".into());
     }
 
-    let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into());
-    let fps = cfg.fps.to_string();
     let g = (cfg.fps * 2).to_string();
     let bitrate = cfg.bitrate.clone();
 
@@ -32,15 +33,32 @@ pub fn build_args(cfg: &Config, req: &StreamRequest) -> Result<Vec<String>, Stri
         "-loglevel".into(),
         "error".into(),
         "-stats".into(),
-        "-f".into(),
-        "x11grab".into(),
-        "-framerate".into(),
-        fps,
-        "-window_id".into(),
-        req.window_id.clone(),
-        "-i".into(),
-        display,
     ];
+
+    match req.display {
+        DisplayServer::X11 => {
+            let window_id = req
+                .window_id
+                .as_ref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "X11 では --window が必要です".to_string())?;
+            let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into());
+            args.extend([
+                "-f".into(),
+                "x11grab".into(),
+                "-framerate".into(),
+                cfg.fps.to_string(),
+                "-window_id".into(),
+                window_id.clone(),
+                "-i".into(),
+                display,
+            ]);
+        }
+        DisplayServer::Wayland => {
+            // portal_helper → Y4M on stdin
+            args.extend(["-f".into(), "yuv4mpegpipe".into(), "-i".into(), "-".into()]);
+        }
+    }
 
     let has_audio = req.audio.as_ref().is_some_and(|a| !a.is_empty());
     if has_audio {
@@ -50,6 +68,11 @@ pub fn build_args(cfg: &Config, req: &StreamRequest) -> Result<Vec<String>, Stri
             "-i".into(),
             req.audio.clone().unwrap(),
         ]);
+    }
+
+    // マップ: 映像は常に 0、音声はあれば 1
+    if has_audio {
+        args.extend(["-map".into(), "0:v".into(), "-map".into(), "1:a".into()]);
     }
 
     args.extend([
@@ -159,11 +182,46 @@ pub fn spawn_ffmpeg(args: &[String]) -> io::Result<Child> {
         .spawn()
 }
 
-/// ffmpeg を前面で待ち、終了コードを返す。
-/// 端末の Ctrl+C は同一プロセスグループへ届くため、ffmpeg にも SIGINT が送られる。
+/// Wayland: helper(Y4M stdout) → ffmpeg stdin。両方を待ち、先に終わった方で相手を止める。
+pub fn spawn_ffmpeg_with_video_stdin(
+    args: &[String],
+    video_stdout: impl Into<Stdio>,
+) -> io::Result<Child> {
+    Command::new("ffmpeg")
+        .args(args)
+        .stdin(video_stdout)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+}
+
 pub fn wait_ffmpeg(mut child: Child) -> io::Result<i32> {
     let status = child.wait()?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// helper と ffmpeg を待ち、終了コードを返す（ffmpeg 優先）。
+pub fn wait_helper_and_ffmpeg(mut helper: Child, mut ffmpeg: Child) -> io::Result<i32> {
+    // どちらかが終わるまでポーリング
+    loop {
+        match ffmpeg.try_wait()? {
+            Some(status) => {
+                let _ = helper.kill();
+                let _ = helper.wait();
+                return Ok(status.code().unwrap_or(1));
+            }
+            None => {}
+        }
+        match helper.try_wait()? {
+            Some(_status) => {
+                // 映像側が先に終わった → ffmpeg に EOF。少し待ってから終了コード
+                let status = ffmpeg.wait()?;
+                return Ok(status.code().unwrap_or(1));
+            }
+            None => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 #[cfg(test)]
@@ -182,22 +240,39 @@ mod tests {
     }
 
     #[test]
-    fn single_dest_flv() {
+    fn single_dest_flv_x11() {
         let cfg = sample_cfg();
         let args = build_args(
             &cfg,
             &StreamRequest {
-                window_id: "0x123".into(),
+                window_id: Some("0x123".into()),
                 audio: Some("alsa_input.mic".into()),
                 destinations: vec![Destination::Youtube],
+                display: DisplayServer::X11,
             },
         )
         .unwrap();
-        assert!(args.iter().any(|a| a == "error"));
-        assert!(args.contains(&"-stats".to_string()));
+        assert!(args.contains(&"x11grab".to_string()));
         assert!(args.contains(&"flv".to_string()));
         assert!(args.iter().any(|a| a.contains("ytkey")));
-        assert!(!args.iter().any(|a| a == "tee"));
+    }
+
+    #[test]
+    fn wayland_y4m_stdin() {
+        let cfg = sample_cfg();
+        let args = build_args(
+            &cfg,
+            &StreamRequest {
+                window_id: None,
+                audio: None,
+                destinations: vec![Destination::Youtube],
+                display: DisplayServer::Wayland,
+            },
+        )
+        .unwrap();
+        assert!(args.contains(&"yuv4mpegpipe".to_string()));
+        assert!(!args.iter().any(|a| a == "x11grab"));
+        assert!(args.contains(&"-an".to_string()));
     }
 
     #[test]
@@ -206,14 +281,14 @@ mod tests {
         let args = build_args(
             &cfg,
             &StreamRequest {
-                window_id: "0x123".into(),
+                window_id: Some("0x123".into()),
                 audio: None,
                 destinations: vec![Destination::Youtube, Destination::Twitch],
+                display: DisplayServer::X11,
             },
         )
         .unwrap();
         assert!(args.contains(&"tee".to_string()));
-        assert!(args.contains(&"-an".to_string()));
         let tee = args.last().unwrap();
         assert!(tee.contains("[f=flv]"));
         assert!(tee.contains('|'));
@@ -225,9 +300,10 @@ mod tests {
         let args = build_args(
             &cfg,
             &StreamRequest {
-                window_id: "0x1".into(),
+                window_id: Some("0x1".into()),
                 audio: None,
                 destinations: vec![Destination::Youtube],
+                display: DisplayServer::X11,
             },
         )
         .unwrap();

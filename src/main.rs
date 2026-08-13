@@ -1,15 +1,21 @@
-//! 軽量 ffmpeg ラッパー配信 CLI（Linux X11）。
+//! 軽量 ffmpeg ラッパー配信 CLI（Linux X11 / Wayland）。
 
 mod config;
 mod doctor;
 mod ffmpeg;
+mod portal;
+mod session;
 mod sources;
 
 use config::{Config, Destination};
 use doctor::{
     preflight, require_linux, run_doctor, validate_config_values, validate_window_id,
 };
-use ffmpeg::{build_args, masked_command, spawn_ffmpeg, wait_ffmpeg, StreamRequest};
+use ffmpeg::{
+    build_args, masked_command, spawn_ffmpeg, spawn_ffmpeg_with_video_stdin, wait_ffmpeg,
+    wait_helper_and_ffmpeg, StreamRequest,
+};
+use session::DisplayServer;
 use sources::{list_audio, list_windows, AudioSource, Window};
 use std::env;
 use std::io::{self, Write};
@@ -45,14 +51,7 @@ fn run() -> Result<(), String> {
         }
         "init" => cmd_init(),
         "doctor" => cmd_doctor(),
-        "list-windows" => {
-            require_linux()?;
-            let wins = list_windows().map_err(|e| e.to_string())?;
-            for (i, w) in wins.iter().enumerate() {
-                println!("{:>3}  {}  {}", i + 1, w.id, w.title);
-            }
-            Ok(())
-        }
+        "list-windows" => cmd_list_windows(),
         "list-audio" => {
             require_linux()?;
             let srcs = list_audio().map_err(|e| e.to_string())?;
@@ -74,23 +73,25 @@ fn run() -> Result<(), String> {
 fn print_help() {
     println!(
         "\
-cli-streamer {VERSION} — 軽量 ffmpeg 配信ラッパー (Linux/X11)
+cli-streamer {VERSION} — 軽量 ffmpeg 配信ラッパー (Linux X11 / Wayland)
 
 使い方:
-  cli-streamer                  対話モード（番号選択）
+  cli-streamer                  対話モード
   cli-streamer init             設定テンプレートを作成
   cli-streamer doctor           依存・環境・設定を点検
-  cli-streamer list-windows     ウィンドウ一覧
+  cli-streamer list-windows     ウィンドウ一覧（X11 のみ）
   cli-streamer list-audio       音声ソース一覧
-  cli-streamer start [options]  非対話で配信開始
+  cli-streamer start [options]  配信開始
   cli-streamer version
   cli-streamer help
 
 start オプション:
-  --window <0xid>     キャプチャするウィンドウ ID（必須）
+  --window <0xid>     X11: ウィンドウ ID（X11 では必須）
   --audio <name>      Pulse ソース名（省略で無音）
   --dest <list>       youtube,twitch,kick をカンマ区切り（必須）
   --dry-run           コマンドを表示するだけ（起動しない）
+
+Wayland では --window は不要。OS の共有ダイアログでウィンドウを選びます。
 
 設定: ~/.config/cli-streamer/config
   （環境変数 CLI_STREAMER_CONFIG で上書き可）
@@ -140,7 +141,28 @@ fn cmd_doctor() -> Result<(), String> {
     }
 }
 
+fn cmd_list_windows() -> Result<(), String> {
+    require_linux()?;
+    match session::detect()? {
+        DisplayServer::Wayland => {
+            println!(
+                "Wayland ではウィンドウ一覧は使えません。\
+                 配信開始時に OS の共有ダイアログでウィンドウを選んでください。"
+            );
+            Ok(())
+        }
+        DisplayServer::X11 => {
+            let wins = list_windows().map_err(|e| e.to_string())?;
+            for (i, w) in wins.iter().enumerate() {
+                println!("{:>3}  {}  {}", i + 1, w.id, w.title);
+            }
+            Ok(())
+        }
+    }
+}
+
 fn parse_start_args(args: &[String]) -> Result<(StreamRequest, bool), String> {
+    let display = session::detect()?;
     let mut window_id: Option<String> = None;
     let mut audio: Option<String> = None;
     let mut dest_raw: Option<String> = None;
@@ -173,16 +195,29 @@ fn parse_start_args(args: &[String]) -> Result<(StreamRequest, bool), String> {
         i += 1;
     }
 
-    let window_id = window_id.ok_or("--window は必須です")?;
-    validate_window_id(&window_id)?;
     let dest_raw = dest_raw.ok_or("--dest は必須です")?;
     let destinations = parse_dest_list(&dest_raw)?;
+
+    let window_id = match display {
+        DisplayServer::X11 => {
+            let id = window_id.ok_or("--window は X11 では必須です")?;
+            validate_window_id(&id)?;
+            Some(id)
+        }
+        DisplayServer::Wayland => {
+            if window_id.is_some() {
+                eprintln!("warning: Wayland では --window は無視されます（OS ダイアログで選択）");
+            }
+            None
+        }
+    };
 
     Ok((
         StreamRequest {
             window_id,
             audio: audio.filter(|a| !a.is_empty() && a != "none"),
             destinations,
+            display,
         },
         dry_run,
     ))
@@ -216,20 +251,48 @@ fn start_stream(req: &StreamRequest, dry_run: bool) -> Result<(), String> {
     }
     let args = build_args(&cfg, req)?;
     eprintln!("# {}", masked_command(&cfg, &args));
+    if req.display == DisplayServer::Wayland {
+        eprintln!("# video: portal_helper.py | ffmpeg (yuv4mpegpipe)");
+    }
     if dry_run {
         println!("dry-run: ffmpeg は起動しません。");
         return Ok(());
     }
-    let child = spawn_ffmpeg(&args).map_err(|e| format!("ffmpeg 起動失敗: {e}"))?;
-    let code = wait_ffmpeg(child).map_err(|e| e.to_string())?;
-    if code != 0 {
-        return Err(format!("ffmpeg が終了コード {code} で終了しました"));
+    run_pipeline(req.display, &args)
+}
+
+fn run_pipeline(display: DisplayServer, args: &[String]) -> Result<(), String> {
+    match display {
+        DisplayServer::X11 => {
+            let child = spawn_ffmpeg(args).map_err(|e| format!("ffmpeg 起動失敗: {e}"))?;
+            let code = wait_ffmpeg(child).map_err(|e| e.to_string())?;
+            if code != 0 {
+                return Err(format!("ffmpeg が終了コード {code} で終了しました"));
+            }
+            Ok(())
+        }
+        DisplayServer::Wayland => {
+            println!("共有ダイアログでウィンドウを選んでください…");
+            let mut helper = portal::spawn_portal_helper()
+                .map_err(|e| format!("portal helper 起動失敗: {e}"))?;
+            let video = helper
+                .stdout
+                .take()
+                .ok_or_else(|| "portal helper の stdout を取得できません".to_string())?;
+            let ffmpeg = spawn_ffmpeg_with_video_stdin(args, video)
+                .map_err(|e| format!("ffmpeg 起動失敗: {e}"))?;
+            let code = wait_helper_and_ffmpeg(helper, ffmpeg).map_err(|e| e.to_string())?;
+            if code != 0 {
+                return Err(format!("配信プロセスが終了コード {code} で終了しました"));
+            }
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 fn interactive() -> Result<(), String> {
     require_linux()?;
+    let display = session::detect()?;
     let cfg = Config::load().map_err(|e| e.to_string())?;
     validate_config_values(&cfg)?;
     let available = cfg.available_destinations();
@@ -241,25 +304,30 @@ fn interactive() -> Result<(), String> {
         ));
     }
 
-    // 配信先選択後に Kick 有無が分かるが、先に共通 preflight
-    // （Kick だけ後で追加チェック）
     preflight(&available)?;
 
-    println!("=== ウィンドウ ===");
-    let windows = list_windows().map_err(|e| {
-        format!("{e}\n（Linux X11 で wmctrl が必要です）")
-    })?;
-    if windows.is_empty() {
-        return Err("ウィンドウが見つかりません".into());
-    }
-    print_windows(&windows);
-    let wi = read_index("ウィンドウ番号", 1, windows.len())?;
-    let window = &windows[wi - 1];
+    let window_id = match display {
+        DisplayServer::X11 => {
+            println!("=== ウィンドウ ===");
+            let windows = list_windows().map_err(|e| {
+                format!("{e}\n（Linux X11 で wmctrl が必要です）")
+            })?;
+            if windows.is_empty() {
+                return Err("ウィンドウが見つかりません".into());
+            }
+            print_windows(&windows);
+            let wi = read_index("ウィンドウ番号", 1, windows.len())?;
+            Some(windows[wi - 1].id.clone())
+        }
+        DisplayServer::Wayland => {
+            println!("=== ウィンドウ ===");
+            println!("Wayland: 開始時に OS の共有ダイアログでウィンドウを選びます（単体キャプチャ）。");
+            None
+        }
+    };
 
     println!("\n=== 音声（0 = なし）===");
-    let audios = list_audio().map_err(|e| {
-        format!("{e}\n（pactl が必要です）")
-    })?;
+    let audios = list_audio().map_err(|e| format!("{e}\n（pactl が必要です）"))?;
     println!("  0  (無音)");
     print_audios(&audios);
     let ai = read_index("音声番号", 0, audios.len())?;
@@ -277,13 +345,17 @@ fn interactive() -> Result<(), String> {
     preflight(&dests)?;
 
     let req = StreamRequest {
-        window_id: window.id.clone(),
+        window_id,
         audio,
         destinations: dests,
+        display,
     };
     let args = build_args(&cfg, &req)?;
     println!("\nコマンド:");
     println!("{}", masked_command(&cfg, &args));
+    if display == DisplayServer::Wayland {
+        println!("# video: portal_helper.py | ffmpeg (yuv4mpegpipe)");
+    }
     print!("Enter で開始 / Ctrl+C で中止 > ");
     let _ = io::stdout().flush();
     let mut line = String::new();
@@ -292,12 +364,7 @@ fn interactive() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     println!("配信中…（Ctrl+C で停止）");
-    let child = spawn_ffmpeg(&args).map_err(|e| format!("ffmpeg 起動失敗: {e}"))?;
-    let code = wait_ffmpeg(child).map_err(|e| e.to_string())?;
-    if code != 0 {
-        return Err(format!("ffmpeg が終了コード {code} で終了しました"));
-    }
-    Ok(())
+    run_pipeline(display, &args)
 }
 
 fn print_windows(windows: &[Window]) {
