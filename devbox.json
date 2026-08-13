@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/main/.schema/devbox.schema.json",
+  "packages": [
+    "rustup@latest",
+    "ffmpeg@latest",
+    "wmctrl@latest",
+    "pulseaudio@latest"
+  ],
+  "shell": {
+    "init_hook": [
+      "echo 'cli-streamer: ffmpeg / wmctrl / pactl を PATH に載せた Devbox shell'"
+    ],
+    "scripts": {
+      "build": ["cargo build --release"],
+      "test": ["cargo test"],
+      "run": ["cargo run --"]
+    }
+  }
+}

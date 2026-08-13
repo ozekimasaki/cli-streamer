@@ -1,0 +1,28 @@
+[package]
+name = "cli-streamer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Lightweight ffmpeg wrapper for YouTube / Twitch / Kick on Linux X11"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/ozekimasaki/cli-streamer"
+homepage = "https://github.com/ozekimasaki/cli-streamer"
+authors = ["Masaki Ozeki <ozekimasaki>"]
+keywords = ["ffmpeg", "streaming", "youtube", "twitch", "kick"]
+categories = ["command-line-utilities", "multimedia"]
+publish = false
+
+[[bin]]
+name = "cli-streamer"
+path = "src/main.rs"
+
+[dependencies]
+# 外部 crate なし（標準ライブラリのみ）
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "z"
