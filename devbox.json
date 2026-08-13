@@ -4,15 +4,20 @@
     "rustup@latest",
     "ffmpeg@latest",
     "wmctrl@latest",
-    "pulseaudio@latest"
+    "pulseaudio@latest",
+    "python3@latest",
+    "gstreamer@latest",
+    "gst-plugins-base@latest",
+    "pipewire@latest"
   ],
   "shell": {
     "init_hook": [
-      "echo 'cli-streamer: ffmpeg / wmctrl / pactl を PATH に載せた Devbox shell'"
+      "echo 'cli-streamer: ffmpeg / wmctrl / pactl / gstreamer / python3（Wayland はホストの portal + PyGObject も必要）'"
     ],
     "scripts": {
       "build": ["cargo build --release"],
-      "test": ["cargo test"],
+      "test": ["cargo test --all-targets"],
+      "e2e": ["cargo test --test e2e_smoke"],
       "run": ["cargo run --"]
     }
   }

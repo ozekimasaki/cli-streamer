@@ -1,8 +1,10 @@
 # cli-streamer
 
-Lightweight ffmpeg wrapper for live streaming to **YouTube / Twitch / Kick** on **Linux X11**.
+Lightweight ffmpeg wrapper for live streaming to **YouTube / Twitch / Kick** on **Linux**.
 
-This tool only lists windows/audio, reads config, and spawns `ffmpeg`. Encoding and upload are done by ffmpeg.
+Supports **X11** (window list + `x11grab`) and **Wayland** (OS ScreenCast portal → window-only capture via PipeWire / GStreamer).
+
+Encoding and upload are done by ffmpeg. This tool lists sources, reads config, and spawns helpers.
 
 ## Install
 
@@ -10,15 +12,25 @@ This tool only lists windows/audio, reads config, and spawns `ffmpeg`. Encoding 
 cargo install --git https://github.com/ozekimasaki/cli-streamer --locked
 ```
 
-Ensure `~/.cargo/bin` is on your `PATH`.
-
-Requires **Rust 1.74+**. Not published to crates.io (`publish = false`).
+Ensure `~/.cargo/bin` is on your `PATH`. Requires **Rust 1.74+**. Not on crates.io (`publish = false`).
 
 ### Requirements (runtime)
 
-- Linux **X11** session (Wayland not supported)
-- `ffmpeg` with `x11grab`, `pulse`, `libx264`, `aac`, `rtmp` (and `rtmps` for Kick)
-- `wmctrl`, `pactl`
+**Common**
+
+- Linux
+- `ffmpeg` (`libx264`, `aac`, `rtmp`; `rtmps` for Kick)
+- `pactl` (Pulse / PipeWire)
+
+**X11**
+
+- X11 session, `wmctrl`
+
+**Wayland** (window-only, no overlapping windows)
+
+- Wayland session + `xdg-desktop-portal` (+ DE portal, e.g. gnome/kde/wlr)
+- `python3` with **PyGObject** (`Gio`)
+- `gst-launch-1.0` and GStreamer **pipewiresrc** (`gstreamer1.0-pipewire` etc.)
 
 ```bash
 cli-streamer doctor
@@ -26,15 +38,21 @@ cli-streamer doctor
 
 ### Limitations
 
-- `x11grab` captures a screen rectangle; overlapping windows may appear
+- **X11:** `x11grab` captures a screen rectangle; overlapping windows may appear
+- **Wayland:** window is chosen in the OS share dialog (no CLI window ID); portal session must stay alive while streaming
 - Stream keys appear in process arguments (`ps`); keep the machine trusted
-- No Wayland, NVENC/VAAPI auto, audio mix, overlays, or OAuth
+- No NVENC/VAAPI auto, audio mix, overlays, or OAuth
 
 ---
 
 ## 日本語
 
-Linux/X11 向けの**極薄** ffmpeg ラッパー。ウィンドウと音声を選び、YouTube / Twitch / Kick へ RTMP(S) 配信する。
+Linux 向けの**極薄** ffmpeg ラッパー。YouTube / Twitch / Kick へ RTMP(S) 配信する。
+
+| セッション | ウィンドウ指定 | キャプチャ |
+|-----------|----------------|------------|
+| **X11** | `wmctrl` 番号 / `--window 0xid` | `x11grab`（矩形。重なりが映ることがある） |
+| **Wayland** | OS の共有ダイアログ | ポータル → PipeWire → GStreamer → Y4M → ffmpeg（**ウィンドウ単体**） |
 
 ### インストール
 
@@ -42,19 +60,20 @@ Linux/X11 向けの**極薄** ffmpeg ラッパー。ウィンドウと音声を�
 cargo install --git https://github.com/ozekimasaki/cli-streamer --locked
 ```
 
-開発（[Devbox](https://www.jetify.com/devbox) 推奨）:
+開発（[Devbox](https://www.jetify.com/devbox)）:
 
 ```bash
 devbox shell
-devbox run build   # target/release/cli-streamer
+devbox run build
 devbox run test
 ```
+
+Wayland の実キャプチャはホストの portal / PyGObject が必要です（Devbox だけでは不足することがあります）。
 
 ### 設定
 
 ```bash
 cli-streamer init
-# ~/.config/cli-streamer/config を編集
 chmod 600 ~/.config/cli-streamer/config
 ```
 
@@ -68,34 +87,24 @@ bitrate=4500k
 fps=30
 ```
 
-- **YouTube:** Studio のストリームキー
-- **Twitch:** 配信のプライマリキー（ingest は `live.twitch.tv`）
-- **Kick:** ダッシュボードのアカウント固有 Stream URL と Key（ホストだけで可。`:443/app` は自動付与）
-
-パスは `CLI_STREAMER_CONFIG` で上書き可能。**ストリームキーをリポジトリにコミットしないこと。**
-
-画面上のコマンド表示ではキーをマスクする。ffmpeg のログは `-loglevel error` で URL を出しにくくしている。ただし同じマシンの `ps` では引数にキーが見える。
+**ストリームキーをリポジトリにコミットしないこと。**
 
 ### 使い方
 
 ```bash
 cli-streamer doctor
-cli-streamer              # 対話（番号選択）
+cli-streamer              # 対話
+
+# X11
 cli-streamer list-windows
-cli-streamer list-audio
 cli-streamer start --window 0x01234567 --audio alsa_input.usb-Mic --dest youtube,twitch
-cli-streamer start --window 0x01234567 --dest kick --dry-run
+
+# Wayland（共有ダイアログが開く）
+cli-streamer start --dest kick
+cli-streamer start --dest youtube --dry-run
 ```
 
-配信中は ffmpeg の stderr（stats）を表示。停止は **Ctrl+C**。
-
-### 動作の要点
-
-- 映像: `x11grab` + `-window_id`
-- 音声: Pulse ソースを **1つ**（省略時は `-an`）
-- 映像: `libx264` veryfast CBR、キーフレーム 2 秒
-- 音声: AAC 48 kHz stereo
-- 複数先: エンコード 1 回 + ffmpeg `tee`
+停止は **Ctrl+C**。
 
 ### ライセンス
 

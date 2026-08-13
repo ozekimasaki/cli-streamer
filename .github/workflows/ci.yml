@@ -15,9 +15,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Test
-        run: cargo test --locked
+
+      - name: Install runtime deps for E2E
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg \
+            pulseaudio-utils \
+            wmctrl \
+            gstreamer1.0-tools \
+            gstreamer1.0-pipewire \
+            python3 \
+            python3-gi \
+            gir1.2-glib-2.0
+
+      - name: Unit + E2E tests
+        run: cargo test --locked --all-targets
+
       - name: Release build
         run: cargo build --release --locked
-      - name: Version
-        run: cargo run --locked -- version
+
+      - name: Version smoke
+        run: ./target/release/cli-streamer version
