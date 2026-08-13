@@ -16,7 +16,8 @@
     ],
     "scripts": {
       "build": ["cargo build --release"],
-      "test": ["cargo test"],
+      "test": ["cargo test --all-targets"],
+      "e2e": ["cargo test --test e2e_smoke"],
       "run": ["cargo run --"]
     }
   }

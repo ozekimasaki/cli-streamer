@@ -7,6 +7,7 @@
 - Wayland: xdg-desktop-portal ScreenCast（WINDOW）でウィンドウ単体キャプチャ
 - PyGObject + GStreamer `pipewiresrc` → Y4M → ffmpeg の既存ツール橋渡し
 - 表示サーバ自動判定（X11 / Wayland）。Wayland では Xwayland にフォールバックしない
+- E2E スモーク（`tests/e2e_smoke.rs`）と CI でのランタイム依存インストール
 
 ### Changed
 
