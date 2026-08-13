@@ -145,8 +145,7 @@ fn x11_start_dry_run_masks_key() {
         String::from_utf8_lossy(&out.stderr)
     );
     if !out.status.success() {
-        eprintln!("x11 dry-run soft-fail: {combined}");
-        return;
+        panic!("x11 dry-run failed: {combined}");
     }
     assert!(combined.contains("dry-run") || combined.contains("x11grab"), "{combined}");
     assert!(
@@ -192,8 +191,7 @@ fn wayland_start_dry_run_uses_y4m() {
         String::from_utf8_lossy(&out.stderr)
     );
     if !out.status.success() {
-        eprintln!("wayland dry-run soft-fail: {combined}");
-        return;
+        panic!("wayland dry-run failed: {combined}");
     }
     assert!(
         combined.contains("yuv4mpegpipe") || combined.contains("portal_helper"),

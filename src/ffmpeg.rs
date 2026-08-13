@@ -55,8 +55,15 @@ pub fn build_args(cfg: &Config, req: &StreamRequest) -> Result<Vec<String>, Stri
             ]);
         }
         DisplayServer::Wayland => {
-            // portal_helper → Y4M on stdin
-            args.extend(["-f".into(), "yuv4mpegpipe".into(), "-i".into(), "-".into()]);
+            // portal_helper → Y4M on stdin（-r で設定 fps に合わせる）
+            args.extend([
+                "-f".into(),
+                "yuv4mpegpipe".into(),
+                "-r".into(),
+                cfg.fps.to_string(),
+                "-i".into(),
+                "-".into(),
+            ]);
         }
     }
 
@@ -200,21 +207,45 @@ pub fn wait_ffmpeg(mut child: Child) -> io::Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
+/// SIGKILL せずに止める。helper が Session.Close と gst-launch 停止をできるようにする。
+fn terminate_gracefully(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id().to_string();
+        let _ = Command::new("kill").args(["-INT", &pid]).status();
+        for _ in 0..20 {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(_) => break,
+            }
+        }
+        let _ = Command::new("kill").args(["-TERM", &pid]).status();
+        for _ in 0..10 {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(_) => break,
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// helper と ffmpeg を待ち、終了コードを返す（ffmpeg 優先）。
 pub fn wait_helper_and_ffmpeg(mut helper: Child, mut ffmpeg: Child) -> io::Result<i32> {
-    // どちらかが終わるまでポーリング
     loop {
         match ffmpeg.try_wait()? {
             Some(status) => {
-                let _ = helper.kill();
-                let _ = helper.wait();
+                terminate_gracefully(&mut helper);
                 return Ok(status.code().unwrap_or(1));
             }
             None => {}
         }
         match helper.try_wait()? {
             Some(_status) => {
-                // 映像側が先に終わった → ffmpeg に EOF。少し待ってから終了コード
+                // 映像側が先に終わった → ffmpeg に EOF
                 let status = ffmpeg.wait()?;
                 return Ok(status.code().unwrap_or(1));
             }
@@ -273,6 +304,7 @@ mod tests {
         assert!(args.contains(&"yuv4mpegpipe".to_string()));
         assert!(!args.iter().any(|a| a == "x11grab"));
         assert!(args.contains(&"-an".to_string()));
+        assert!(args.windows(2).any(|w| w[0] == "-r" && w[1] == "30"));
     }
 
     #[test]

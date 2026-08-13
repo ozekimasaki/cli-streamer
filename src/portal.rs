@@ -25,10 +25,11 @@ pub fn materialize_helper() -> io::Result<PathBuf> {
 }
 
 /// python3 ヘルパーを起動（stdout = Y4M）。
-pub fn spawn_portal_helper() -> io::Result<Child> {
+pub fn spawn_portal_helper(fps: u32) -> io::Result<Child> {
     let script = materialize_helper()?;
     Command::new("python3")
         .arg(&script)
+        .env("CLI_STREAMER_FPS", fps.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

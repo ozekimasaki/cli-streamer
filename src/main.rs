@@ -258,10 +258,10 @@ fn start_stream(req: &StreamRequest, dry_run: bool) -> Result<(), String> {
         println!("dry-run: ffmpeg は起動しません。");
         return Ok(());
     }
-    run_pipeline(req.display, &args)
+    run_pipeline(req.display, &args, cfg.fps)
 }
 
-fn run_pipeline(display: DisplayServer, args: &[String]) -> Result<(), String> {
+fn run_pipeline(display: DisplayServer, args: &[String], fps: u32) -> Result<(), String> {
     match display {
         DisplayServer::X11 => {
             let child = spawn_ffmpeg(args).map_err(|e| format!("ffmpeg 起動失敗: {e}"))?;
@@ -273,7 +273,7 @@ fn run_pipeline(display: DisplayServer, args: &[String]) -> Result<(), String> {
         }
         DisplayServer::Wayland => {
             println!("共有ダイアログでウィンドウを選んでください…");
-            let mut helper = portal::spawn_portal_helper()
+            let mut helper = portal::spawn_portal_helper(fps)
                 .map_err(|e| format!("portal helper 起動失敗: {e}"))?;
             let video = helper
                 .stdout
@@ -364,7 +364,7 @@ fn interactive() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     println!("配信中…（Ctrl+C で停止）");
-    run_pipeline(display, &args)
+    run_pipeline(display, &args, cfg.fps)
 }
 
 fn print_windows(windows: &[Window]) {

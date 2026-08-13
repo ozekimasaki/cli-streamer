@@ -108,19 +108,51 @@ def main() -> None:
 
         call_with_request("Start", build, "csstart", after_start)
 
+    def available_cursor_modes() -> int:
+        """未対応の cursor_mode を指定するとセッションが閉じるので、 advertised なときだけ使う。"""
+        try:
+            props = Gio.DBusProxy.new_sync(
+                bus,
+                Gio.DBusProxyFlags.NONE,
+                None,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.DBus.Properties",
+                None,
+            )
+            variant = props.call_sync(
+                "Get",
+                GLib.Variant(
+                    "(ss)",
+                    ("org.freedesktop.portal.ScreenCast", "AvailableCursorModes"),
+                ),
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None,
+            )
+            inner = variant.unpack()[0]
+            if isinstance(inner, tuple):
+                inner = inner[0]
+            return int(inner)
+        except Exception:
+            return 0
+
     def after_create(results) -> None:
         session = results.get("session_handle")
         if not session:
             raise RuntimeError("session_handle がありません")
         state["session"] = session
+        modes = available_cursor_modes()
 
         def build(token: str):
             opts = {
                 "handle_token": GLib.Variant("s", token),
                 "types": GLib.Variant("u", 2),  # WINDOW
                 "multiple": GLib.Variant("b", False),
-                "cursor_mode": GLib.Variant("u", 2),  # embedded
             }
+            # Embedded = 2
+            if modes & 2:
+                opts["cursor_mode"] = GLib.Variant("u", 2)
             return GLib.Variant("(oa{sv})", (state["session"], opts))
 
         call_with_request("SelectSources", build, "csselect", after_select)
@@ -162,7 +194,13 @@ def main() -> None:
         pass
 
     node = state["node"]
-    print(f"portal-helper: gst-launch node={node}", file=sys.stderr)
+    try:
+        fps = int(os.environ.get("CLI_STREAMER_FPS", "30"))
+        if fps < 1 or fps > 120:
+            fps = 30
+    except ValueError:
+        fps = 30
+    print(f"portal-helper: gst-launch node={node} fps={fps}", file=sys.stderr)
 
     gst = subprocess.Popen(
         [
@@ -176,7 +214,9 @@ def main() -> None:
             "!",
             "videoconvert",
             "!",
-            "video/x-raw,format=I420",
+            "videorate",
+            "!",
+            f"video/x-raw,format=I420,framerate={fps}/1",
             "!",
             "y4menc",
             "!",

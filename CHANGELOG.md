@@ -15,6 +15,13 @@
 - Wayland では `--window` 不要（OS 共有ダイアログ）
 - `list-windows` は Wayland では案内のみ
 
+### Fixed
+
+- Wayland 停止時に helper へ SIGINT/SIGTERM（gst-launch とポータルセッションが残らないようにする）
+- Wayland でも設定の fps を videorate / ffmpeg `-r` に反映
+- ScreenCast の `cursor_mode` は AvailableCursorModes にあるときだけ指定
+- E2E dry-run は依存がある環境で失敗を無視しない
+
 ## [0.1.0] - 2026-08-13
 
 ### Added
